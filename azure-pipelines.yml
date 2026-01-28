@@ -1,0 +1,197 @@
+# =======================
+# Pytest + Playwright
+# =======================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+# Nightly a las 02:00 UTC (main/develop)
+schedules:
+  - cron: "0 2 * * *"
+    displayName: Nightly 2AM UTC
+    branches:
+      include:
+        - main
+        - develop
+    always: true
+
+# Parámetros para ejecuciones manuales (Run pipeline)
+parameters:
+  - name: environment
+    displayName: Environment to run tests
+    type: string
+    default: qa
+    values: [dev, qa, prod]
+
+  - name: marker
+    displayName: Marker to run (all = run full battery)
+    type: string
+    default: all
+    values: [all, smoke, critical, regression, login]
+
+# Variables globales
+variables:
+  - group: e2e-secrets
+
+  - name: PYTHON_VERSION
+    value: '3.11'
+  - name: PLAYWRIGHT_BROWSERS_PATH
+    value: '$(Pipeline.Workspace)/.playwright'
+  - name: PIP_CACHE_DIR
+    value: '$(Pipeline.Workspace)/.pip-cache'
+  - name: MIN_PASS_RATE
+    value: '0.90'   # Quality Gate: 90% mínimo
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+  - job: tests
+    displayName: Install once, run many
+
+    steps:
+      - checkout: self
+        displayName: 📥 Checkout code
+
+      - task: UsePythonVersion@0
+        displayName: 🐍 Setup Python
+        inputs:
+          versionSpec: '$(PYTHON_VERSION)'
+
+      # Cache de pip (usamos un directorio de cache explícito)
+      - task: Cache@2
+        displayName: ♻️ Cache pip
+        inputs:
+          key: 'pip | "$(Agent.OS)" | requirements.txt | $(PYTHON_VERSION)'
+          path: '$(PIP_CACHE_DIR)'
+
+      - script: |
+          python -m pip install --upgrade pip
+          pip config set global.cache-dir $(PIP_CACHE_DIR)
+          pip install -r requirements.txt
+        displayName: 📦 Install dependencies (once)
+
+      # Cache de navegadores Playwright
+      - task: Cache@2
+        displayName: ♻️ Cache Playwright browsers
+        inputs:
+          key: 'playwright | "$(Agent.OS)" | requirements.txt'
+          path: '$(PLAYWRIGHT_BROWSERS_PATH)'
+
+      - script: |
+          playwright install chromium --with-deps
+        displayName: 🎭 Install Playwright Browsers (once)
+
+      # .env a partir de parámetros + secretos
+      - script: |
+          set -e
+          ENV='${{ parameters.environment }}'
+          echo "ENVIRONMENT=$ENV" > .env
+
+          if [ "$ENV" = "prod" ]; then
+            echo "BASE_URL=$(PROD_BASE_URL)" >> .env
+            echo "USERNAME=$(PROD_USERNAME)" >> .env
+            echo "PASSWORD=$(PROD_PASSWORD)" >> .env
+          else
+            echo "BASE_URL=$(QA_BASE_URL)" >> .env
+            echo "USERNAME=$(QA_USERNAME)" >> .env
+            echo "PASSWORD=$(QA_PASSWORD)" >> .env
+          fi
+
+          echo "Generated .env:"
+          sed 's/PASSWORD=.*/PASSWORD=****/g' .env
+        displayName: 📝 Create .env from secrets
+
+      # Preparar carpeta de reportes
+      - script: |
+          mkdir -p reports
+        displayName: 📂 Init reports dir
+
+      # ========== SUITES ==========
+      - script: |
+          pytest -m smoke \
+            --html=reports/smoke-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-smoke.xml
+        displayName: 💨 Run Smoke
+        condition: or(eq('${{ parameters.marker }}','smoke'), eq('${{ parameters.marker }}','all'))
+        continueOnError: true   # Permite seguir para Quality Gate
+
+      - script: |
+          pytest -m critical \
+            --html=reports/critical-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-critical.xml
+        displayName: 🔴 Run Critical
+        condition: or(eq('${{ parameters.marker }}','critical'), eq('${{ parameters.marker }}','all'))
+        continueOnError: true
+
+      - script: |
+          pytest -m login \
+            --html=reports/login-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-login.xml
+        displayName: 🔐 Run Login
+        condition: or(eq('${{ parameters.marker }}','login'), eq('${{ parameters.marker }}','all'))
+        continueOnError: true
+
+      - script: |
+          pytest -m regression \
+            --html=reports/regression-report.html --self-contained-html --tb=short -v -n auto \
+            --junitxml=reports/junit-regression.xml
+        displayName: 🔄 Run Regression (main/develop or marker=regression)
+        condition: or(
+            eq('${{ parameters.marker }}','regression'),
+            eq('${{ parameters.marker }}','all'),
+            eq(variables['Build.SourceBranch'],'refs/heads/main'),
+            eq(variables['Build.SourceBranch'],'refs/heads/develop')
+          )
+        continueOnError: true
+
+      # Recolectar screenshots en carpeta de reportes
+      - script: |
+          find . -maxdepth 1 -name "*.png" -exec cp {} reports/ \; || true
+        displayName: 🖼️ Collect screenshots
+        condition: always()
+
+      # Unir todos los JUnit en uno solo
+      - script: |
+          python support/merge_junit.py
+        displayName: 🧩 Merge JUnit reports -> reports/junit.xml
+        condition: always()
+
+      # Publicar el JUnit combinado
+      - task: PublishTestResults@2
+        displayName: 📣 Publish merged JUnit
+        condition: always()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'reports/junit.xml'
+          testRunTitle: 'Merged suites'
+          mergeTestResults: true
+
+      # Evaluación del Quality Gate
+      - script: |
+          if [ ! -f reports/junit.xml ]; then
+            echo "[QualityGate] ERROR: No existe reports/junit.xml. Revisa pasos de merge/generación."
+            exit 2
+          fi
+          python support/quality_gate.py $(MIN_PASS_RATE)
+        displayName: ✅ Quality Gate: pass-rate >= $(MIN_PASS_RATE)
+        failOnStderr: false
+        condition: always()
+
+      # Publicar artefactos
+      - task: PublishBuildArtifacts@1
+        displayName: 📊 Publish test artifacts
+        condition: always()
+        inputs:
+          pathToPublish: 'reports'
+          artifactName: 'reports-$(Build.BuildId)'
+          publishLocation: 'Container'
