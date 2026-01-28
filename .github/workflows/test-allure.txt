@@ -1,0 +1,447 @@
+name: Pytest Automation Tests with Screenplay Pattern
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run tests'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      marker:
+        description: 'Pytest marker to run'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - critical
+          - regression
+          - login
+          - all
+  schedule:
+    # Nightly build - Todos los días a las 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  PYTHON_VERSION: '3.11'
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
+
+jobs:
+  # ============================================
+  # JOB 1: Setup y Validación
+  # ============================================
+  setup:
+    name: Setup & Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: |
+          playwright install chromium --with-deps
+
+      - name: 🔍 Verify Python version
+        run: python --version
+
+      - name: 🔍 Verify Pytest installation
+        run: pytest --version
+
+      - name: 🔍 List installed packages
+        run: pip list
+
+  # ============================================
+  # JOB 2: Smoke Tests (Siempre se ejecutan)
+  # ============================================
+  smoke-tests:
+    name: Smoke Tests
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 📝 Create .env file
+        run: |
+          echo "ENVIRONMENT=qa" >> .env
+          echo "BASE_URL=https://practicetestautomation.com/practice-test-login/" >> .env
+          echo "USERNAME=student" >> .env
+          echo "PASSWORD=Password123" >> .env
+
+      - name: 💨 Run Smoke Tests
+        run: |
+          pytest -m smoke --alluredir=allure-results -v -s --tb=short
+        continue-on-error: false
+
+      - name: 📊 Generate Allure Report
+        if: always()
+        run: |
+          allure generate allure-results -o allure-report --clean
+
+      - name: 📤 Upload Allure Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-allure-results
+          path: allure-results/
+          retention-days: 7
+
+      - name: 📤 Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-allure-report
+          path: allure-report/
+          retention-days: 7
+
+      - name: 📸 Upload Screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshots
+          path: |
+            *.png
+            error_screenshot.png
+            debug_screenshot.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ============================================
+  # JOB 3: Critical Tests
+  # ============================================
+  critical-tests:
+    name: Critical Tests
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 📝 Create .env file
+        run: |
+          echo "ENVIRONMENT=qa" >> .env
+          echo "BASE_URL=https://practicetestautomation.com/practice-test-login/" >> .env
+          echo "USERNAME=student" >> .env
+          echo "PASSWORD=Password123" >> .env
+
+      - name: 🔴 Run Critical Tests
+        run: |
+          pytest -m critical --alluredir=allure-results -v -s --tb=short
+        continue-on-error: false
+
+      - name: 📊 Generate Allure Report
+        if: always()
+        run: |
+          allure generate allure-results -o allure-report --clean
+
+      - name: 📤 Upload Allure Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-allure-results
+          path: allure-results/
+          retention-days: 7
+
+      - name: 📤 Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-allure-report
+          path: allure-report/
+          retention-days: 7
+
+  # ============================================
+  # JOB 4: Regression Tests (Solo Develop/Main)
+  # ============================================
+  regression-tests:
+    name: Regression Tests
+    needs: critical-tests
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 📝 Create .env file
+        run: |
+          echo "ENVIRONMENT=qa" >> .env
+          echo "BASE_URL=https://practicetestautomation.com/practice-test-login/" >> .env
+          echo "USERNAME=student" >> .env
+          echo "PASSWORD=Password123" >> .env
+
+      - name: 🔄 Run Regression Tests
+        run: |
+          pytest -m regression --alluredir=allure-results -v -s --tb=short -n auto
+        continue-on-error: true
+
+      - name: 📊 Generate Allure Report
+        if: always()
+        run: |
+          allure generate allure-results -o allure-report --clean
+
+      - name: 📤 Upload Allure Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-allure-results
+          path: allure-results/
+          retention-days: 7
+
+      - name: 📤 Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-allure-report
+          path: allure-report/
+          retention-days: 7
+
+  # ============================================
+  # JOB 5: Login Tests (Feature específico)
+  # ============================================
+  login-tests:
+    name: Login Feature Tests
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 📝 Create .env file
+        run: |
+          echo "ENVIRONMENT=qa" >> .env
+          echo "BASE_URL=https://practicetestautomation.com/practice-test-login/" >> .env
+          echo "USERNAME=student" >> .env
+          echo "PASSWORD=Password123" >> .env
+
+      - name: 🔐 Run Login Tests
+        run: |
+          pytest -m login --alluredir=allure-results -v -s --tb=short
+
+      - name: 📊 Generate Allure Report
+        if: always()
+        run: |
+          allure generate allure-results -o allure-report --clean
+
+      - name: 📤 Upload Allure Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-allure-results
+          path: allure-results/
+          retention-days: 7
+
+      - name: 📤 Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-allure-report
+          path: allure-report/
+          retention-days: 7
+
+  # ============================================
+  # JOB 6: Parallel Tests (Opcional)
+  # ============================================
+  parallel-tests:
+    name: Parallel Tests Matrix
+    if: false  # Cambiar a true para habilitar
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11']
+        marker: ['smoke', 'critical', 'login']
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 📝 Create .env file
+        run: |
+          echo "ENVIRONMENT=qa" >> .env
+          echo "BASE_URL=https://practicetestautomation.com/practice-test-login/" >> .env
+          echo "USERNAME=student" >> .env
+          echo "PASSWORD=Password123" >> .env
+
+      - name: 🧪 Run Tests - ${{ matrix.marker }}
+        run: |
+          pytest -m ${{ matrix.marker }} --alluredir=allure-results -v -s -n auto
+
+      - name: 📤 Upload results - ${{ matrix.marker }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parallel-results-${{ matrix.marker }}-${{ matrix.python-version }}
+          path: allure-results/
+          retention-days: 7
+
+  # ============================================
+  # JOB 7: Publish Allure Report (GitHub Pages)
+  # ============================================
+  publish-report:
+    name: Publish Allure Report
+    needs: [smoke-tests, critical-tests, login-tests]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 Download all Allure results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-allure-results'
+          path: allure-results
+          merge-multiple: true
+
+      - name: 📊 Generate combined Allure Report
+        run: |
+          allure generate allure-results -o allure-report --clean
+
+      - name: 🚀 Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./allure-report
+          destination_dir: allure-report
+
+  # ============================================
+  # JOB 8: Notificaciones y Resumen
+  # ============================================
+  notify:
+    name: Send Notifications
+    needs: [smoke-tests, critical-tests, regression-tests, login-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📊 Generate Test Summary
+        run: |
+          echo "# 🧪 Test Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Actor:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: ✅ Success Notification
+        if: success()
+        run: |
+          echo "## ✅ All Tests Passed!" >> $GITHUB_STEP_SUMMARY
+          echo "All test suites completed successfully." >> $GITHUB_STEP_SUMMARY
+
+      - name: ❌ Failure Notification
+        if: failure()
+        run: |
+          echo "## ❌ Tests Failed!" >> $GITHUB_STEP_SUMMARY
+          echo "One or more test suites failed. Check the logs for details." >> $GITHUB_STEP_SUMMARY
+
+      # Opcional: Integración con Slack
+      # - name: 📢 Send Slack notification
+      #   if: failure()
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #     payload: |
+      #       {
+      #         "text": "❌ Tests failed on ${{ github.ref_name }}",
+      #         "blocks": [
+      #           {
+      #             "type": "section",
+      #             "text": {
+      #               "type": "mrkdwn",
+      #               "text": "*Build Failed*\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Actor:* ${{ github.actor }}"
+      #             }
+      #           }
+      #         ]
+      #       }

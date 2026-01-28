@@ -1,0 +1,450 @@
+name: Pytest + Playwright CI with Quality Gate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run tests'
+        required: true
+        default: 'qa'
+        type: choice
+        options: [ dev, qa, prod ]
+      marker:
+        description: 'Marker to run'
+        required: true
+        default: 'smoke'
+        type: choice
+        options: [ smoke, critical, regression, login, all ]
+  schedule:
+    - cron: '0 2 * * *'  # Nightly 02:00 UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
+  MIN_PASS_RATE: '0.90' # Quality Gate: 90% mínimo
+
+jobs:
+  # ============================================
+  # JOB 1: Setup
+  # ============================================
+  setup:
+    name: Setup & Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: ♻️ Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎭 Install Playwright Browsers
+        run: playwright install chromium --with-deps
+
+      - name: 🔍 Verify Python & Pytest
+        run: |
+          python --version
+          pytest --version
+
+  # ============================================
+  # JOB 2: Smoke
+  # ============================================
+  smoke-tests:
+    name: Smoke Tests (QA)
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (from secrets)
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment || 'qa' }}" >> .env
+          if [ "${{ inputs.environment || 'qa' }}" = "prod" ]; then
+            echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+          else
+            echo "BASE_URL=${{ secrets.QA_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.QA_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.QA_PASSWORD }}" >> .env
+          fi
+      - name: 📂 Init reports dir
+        run: mkdir -p reports
+      - name: 💨 Run Smoke
+        run: |
+          pytest -m smoke \
+            --html=reports/smoke-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-smoke.xml
+        continue-on-error: true
+      - name: 📊 Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results
+          path: |
+            reports/
+            *.png
+          retention-days: 7
+
+  # ============================================
+  # JOB 3: Critical
+  # ============================================
+  critical-tests:
+    name: Critical Tests (QA)
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (from secrets)
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment || 'qa' }}" >> .env
+          if [ "${{ inputs.environment || 'qa' }}" = "prod" ]; then
+            echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+          else
+            echo "BASE_URL=${{ secrets.QA_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.QA_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.QA_PASSWORD }}" >> .env
+          fi
+      - name: 📂 Init reports dir
+        run: mkdir -p reports
+      - name: 🔴 Run Critical
+        run: |
+          pytest -m critical \
+            --html=reports/critical-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-critical.xml
+        continue-on-error: true
+      - name: 📊 Upload critical artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-test-results
+          path: |
+            reports/
+            *.png
+          retention-days: 7
+
+  # ============================================
+  # JOB 4: Regression (solo main/develop)
+  # ============================================
+  regression-tests:
+    name: Regression Tests (QA)
+    needs: critical-tests
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (from secrets)
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment || 'qa' }}" >> .env
+          if [ "${{ inputs.environment || 'qa' }}" = "prod" ]; then
+            echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+          else
+            echo "BASE_URL=${{ secrets.QA_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.QA_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.QA_PASSWORD }}" >> .env
+          fi
+      - name: 📂 Init reports dir
+        run: mkdir -p reports
+      - name: 🔄 Run Regression
+        run: |
+          pytest -m regression \
+            --html=reports/regression-report.html --self-contained-html --tb=short -v -n auto \
+            --junitxml=reports/junit-regression.xml
+        continue-on-error: true
+      - name: 📊 Upload regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-test-results
+          path: |
+            reports/
+            *.png
+          retention-days: 7
+
+  # ============================================
+  # JOB 5: Login
+  # ============================================
+  login-tests:
+    name: Login Feature Tests (QA)
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (from secrets)
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment || 'qa' }}" >> .env
+          if [ "${{ inputs.environment || 'qa' }}" = "prod" ]; then
+            echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+          else
+            echo "BASE_URL=${{ secrets.QA_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.QA_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.QA_PASSWORD }}" >> .env
+          fi
+      - name: 📂 Init reports dir
+        run: mkdir -p reports
+      - name: 🔐 Run Login
+        run: |
+          pytest -m login \
+            --html=reports/login-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-login.xml
+        continue-on-error: true
+      - name: 📊 Upload login artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-test-results
+          path: |
+            reports/
+            *.png
+          retention-days: 7
+
+  # ============================================
+  # JOB 6: Production Smoke (solo main)
+  # ============================================
+  production-tests:
+    name: Production Smoke Tests
+    needs: regression-tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (prod)
+        run: |
+          echo "ENVIRONMENT=prod" >> .env
+          echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+          echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+          echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+      - name: 🚀 Run Production Smoke
+        run: |
+          mkdir -p reports
+          pytest -m smoke \
+            --html=reports/production-report.html --self-contained-html --tb=short -v \
+            --junitxml=reports/junit-production-smoke.xml
+        continue-on-error: true
+      - name: 📊 Upload production artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-test-results
+          path: |
+            reports/
+            *.png
+          retention-days: 30
+
+  # ============================================
+  # JOB 7: Run by input marker (manual)
+  # ============================================
+  run-marked-tests:
+    name: Run Tests by Input Marker
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+      - name: 📦 Install deps & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: 📝 Create .env (from secrets)
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment || 'qa' }}" >> .env
+          if [ "${{ inputs.environment || 'qa' }}" = "prod" ]; then
+            echo "BASE_URL=${{ secrets.PROD_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.PROD_PASSWORD }}" >> .env
+          else
+            echo "BASE_URL=${{ secrets.QA_BASE_URL }}" >> .env
+            echo "USERNAME=${{ secrets.QA_USERNAME }}" >> .env
+            echo "PASSWORD=${{ secrets.QA_PASSWORD }}" >> .env
+          fi
+      - name: 🧪 Run tests by marker
+        run: |
+          mkdir -p reports
+          if [ "${{ inputs.marker }}" = "all" ]; then
+            pytest --html=reports/all-report.html --self-contained-html -v -n auto \
+                   --junitxml=reports/junit-all.xml
+          else
+            pytest -m "${{ inputs.marker }}" \
+                   --html=reports/${{ inputs.marker }}-report.html --self-contained-html -v -n auto \
+                   --junitxml=reports/junit-${{ inputs.marker }}.xml
+          fi
+        continue-on-error: true
+      - name: 📊 Upload marked artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marked-${{ inputs.marker }}-results
+          path: |
+            reports/
+            *.png
+          retention-days: 7
+
+  # ============================================
+  # JOB 8: QUALITY GATE (merge JUnit + evaluate)
+  # ============================================
+  quality-gate:
+    name: Quality Gate
+    needs:
+      - smoke-tests
+      - critical-tests
+      - regression-tests
+      - login-tests
+      - production-tests
+      - run-marked-tests
+    if: always()
+    runs-on: ubuntu-latest
+
+    env:
+      MIN_PASS_RATE: '0.90'
+
+    steps:
+      - name: 📥 Checkout code (for support scripts)
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📥 Download all test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: collected
+          pattern: "*-test-results"
+          merge-multiple: true
+
+      - name: 🗂️ Prepare reports for merge
+        run: |
+          mkdir -p reports
+          # Copia todos los JUnit encontrados hacia ./reports/
+          find collected -type f -name "junit-*.xml" -exec cp {} reports/ \; || true
+          echo "Found JUnit files:"
+          ls -1 reports || true
+
+      - name: 🧩 Merge JUnit -> reports/junit.xml
+        run: |
+          python support/merge_junit.py
+
+      - name: ✅ Evaluate Quality Gate
+        run: |
+          if [ ! -f reports/junit.xml ]; then
+            echo "[QualityGate] ERROR: reports/junit.xml not found"
+            exit 2
+          fi
+          python support/quality_gate.py ${{ env.MIN_PASS_RATE }}
+
+      - name: 📊 Upload consolidated reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidated-reports
+          path: reports/
+          retention-days: 30
+
+      - name: 📝 Summary
+        if: always()
+        run: |
+          echo "## 🧪 Quality Gate Result" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Pass Rate:** ${{ env.MIN_PASS_RATE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Merged JUnit:** reports/junit.xml" >> $GITHUB_STEP_SUMMARY
