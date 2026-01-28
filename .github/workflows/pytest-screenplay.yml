@@ -383,7 +383,7 @@ jobs:
   # JOB 8: QUALITY GATE (merge JUnit + evaluate)
   # ============================================
   quality-gate:
-    name: Quality Gate (pass-rate >= ${{ env.MIN_PASS_RATE }})
+    name: Quality Gate
     needs:
       - smoke-tests
       - critical-tests
@@ -393,6 +393,10 @@ jobs:
       - run-marked-tests
     if: always()
     runs-on: ubuntu-latest
+
+    env:
+      MIN_PASS_RATE: '0.90'
+
     steps:
       - name: 📥 Checkout code (for support scripts)
         uses: actions/checkout@v4
